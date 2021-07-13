@@ -1,0 +1,139 @@
+# laoding the required libraries
+library(BTYDplus)
+library(dplyr)
+library(tidyverse)
+library(readxl)
+
+
+# reading the data
+data <- read_excel("C:/Users/POCs/RFM_pred.xlsx")
+length(unique(data$cust))
+head(data)
+
+#last date of purchase per customer
+last_date <- data %>% 
+  group_by(cust) %>% 
+  summarise(last_date = max(date))
+
+
+#  Filtering transactions for an individual customer
+tot <- data %>% 
+  filter(cust== "Cust 1") %>% 
+  mutate(sum(sales))
+
+
+# Range of the dates in the whole data
+range(data$date)
+
+#Convert from event log to customer-by-sufficient-statistic summary.
+#Split into 104 weeks calibration, and 29 weeks holdout period.
+cbs <- elog2cbs(data, T.cal = "2019-02-01", T.tot = "2019-07-29")
+
+length(cbs$cust)
+head(cbs)
+
+#Report some basic summary stats for calibration and holdout period.
+summary(cbs[, c("x", "sales", "x.star", "sales.star")])
+
+# Estimating the Pareto/nbd model
+params.pnbd <- BTYD::pnbd.EstimateParameters(cbs)
+names(params.pnbd) <- c("r", "alpha", "s", "beta")
+round(params.pnbd, 3)
+
+#Predict transactions 
+## Uses Pareto/NBD model parameters and a customer's past transaction behavior to return the 
+#number of transactions they are expected to make in the Holdout period
+
+cbs$xstar.pnbd <- BTYD::pnbd.ConditionalExpectedTransactions(params = params.pnbd,
+                                                             T.star = cbs$T.star,
+                                                             x = cbs$x,
+                                                             t.x = cbs$t.x,
+                                                             T.cal = cbs$T.cal)
+
+# Comparing actual number of transactions with predicted in the testing period
+total_pred <- data.frame(rbind(`Actuals` = c(`Holdout` = sum(cbs$x.star)),
+                               `Pareto/NBD` = c(`Holdout` = round(sum(cbs$xstar.pnbd)))))
+total_pred
+head(cbs)
+
+summary(cbs)
+
+#creating new variables for :
+# avg sales in holdout period
+# total sales in the holdout period
+# sales residual values = expected total sales in holdout - actual sales in holdout 
+
+#cbs$xstar.pnbd <- round(cbs$xstar.pnbd)
+
+cbs %>% 
+  mutate(avg_sale =  sales.star/ x.star, 0,
+         total_expected_sales = xstar.pnbd * avg_sale,
+         sales_resid = total_expected_sales - sales.star,
+         x.star.resid = xstar.pnbd - x.star) -> cbs
+head(cbs)
+
+#assinging NA = 0 for all the customers that have 0 avg sales sss
+cbs[is.na(cbs)] <- 0
+summary(cbs)
+
+# calculate the probability of customers being alive
+# Uses Pareto/NBD model parameters and a customer's past transaction behavior to return the probability that they are still alive at the end of the calibration period.
+library(BTYD)
+pnbd.PAlive(params.pnbd,cbs$x,cbs$t.x,cbs$T.cal) ->PAlive_probs
+
+#Estimate share of retained customers at end of calibration period.
+cbs %>% 
+  mutate(PAlive = PAlive_probs) -> CBS
+
+CBS$PAlive %>% hist(main = "Survival Probability")
+
+#summary of the probability of being alive
+summary(CBS$PAlive)
+
+
+#plot between the probability of being alive and no. of repeat transactions
+library(ggplot2)
+CBS %>% 
+  filter(x >10) %>% 
+  ggplot() +
+  geom_point(aes(x, PAlive), alpha = .5) +
+  ggtitle("High frquency shoppers are given very high probability of surviving")
+
+# Holdout vs Calibration period
+op <- par(mfrow = c(1, 2))
+
+T.star <- CBS$T.star[1]
+transaction_plot <- BTYD::pnbd.PlotFreqVsConditionalExpectedFrequency(params.pnbd,T.star , CBS, CBS$x.star, censor = 5)
+frequency_plot <- BTYD::pnbd.PlotFrequencyInCalibration(params.pnbd, CBS, censor = 5)
+
+
+#performance of the pareto/NBD model for this dataset
+head(CBS)
+comp <- CBS %>% 
+  select(cust, actual_sales =sales.star
+         , pndb_sales = total_expected_sales)
+
+summary(comp)
+sum(comp$pndb_sales)
+
+  RMSE <- function(response, truth = comp$actual_sales) {
+  (response - truth)^2 %>% sum() %>% sqrt() %>% `/`(., nrow(comp))
+}
+
+pndb_rmse = RMSE(comp$pndb_sales)
+pndb_rmse
+
+summary(comp)
+(sum(comp$actual_sales)-sum(comp$pndb_sales))/sum(comp$actual_sales)
+
+# correlation of the actual adn the predicted sales 
+cor(comp$actual_sales,comp$pndb_sales)
+
+#grouping customers by their probability of survival in the calibration set
+CBS$cust_segm <-ifelse(CBS$PAlive<0.75,"Low_prob",
+                       ifelse(0.75<CBS$PAlive & CBS$PAlive<=0.85,"Medium_prob","High_prob")) 
+table(CBS$cust_segm)
+var(cbs$xstar.pnbd)
+
+write.csv(CBS,"CLV_output_52weeks_22Sept.csv")
+  
